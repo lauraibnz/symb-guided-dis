@@ -1,5 +1,6 @@
 # Virtual environments
 venv/
+venv-py312-backup/
 env/
 .venv/
 
@@ -62,6 +63,7 @@ models/
 *.ckpt
 data/
 datasets/
+midi2audio/target/
 
 # OS
 .DS_Store

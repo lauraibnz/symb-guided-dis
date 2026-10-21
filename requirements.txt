@@ -1,11 +1,21 @@
-torch>=2.0
-torchaudio>=2.0
+# CUDA 13.0 wheels; replace this index with a CPU/other CUDA index if needed.
+--extra-index-url https://download.pytorch.org/whl/cu130
+# Keep these in the same compatible CUDA release family.
+torch>=2.13,<2.14
+torchaudio>=2.11,<2.12
+# Torchaudio's audio I/O backend requires TorchCodec.
+torchcodec>=0.16,<0.17
 lmdb
-wandb
+# TensorFlow 2.15 (required by Basic Pitch) requires protobuf <5.
+protobuf>=3.20.3,<5
+wandb>=0.16
 tqdm
-numpy>=1.26,<2.0
+numpy>=1.26,<2
 gin-config
 pretty_midi
 music2latent
 pyyaml
-librosa
+librosa>=0.10,<0.12
+basic-pitch>=0.4,<0.5
+# Required only when preparing or training the CLAP-timbre variant.
+laion-clap
