@@ -51,6 +51,8 @@ def create_dataloaders(dataset, batch_size=16, train_split=0.95, num_workers=8,
                       group_key=("track", "stem"), seed=42,
                       use_grouped_batching=False,
                       groups_per_batch=16, samples_per_group=2,
+                      train_dataset_sampling_weights=None,
+                      train_dataset_sampling_exponent=None,
                       debug_batch_stats=False,
                       skip_empty_midi=False):
     """
@@ -76,7 +78,8 @@ def create_dataloaders(dataset, batch_size=16, train_split=0.95, num_workers=8,
         return _create_dataloaders_internal(
             dataset, batch_size, train_split, num_workers,
             group_key, seed, use_grouped_batching, groups_per_batch,
-            samples_per_group, debug_batch_stats, skip_empty_midi
+            samples_per_group, train_dataset_sampling_weights, train_dataset_sampling_exponent,
+            debug_batch_stats, skip_empty_midi
         )
     except (RuntimeError, OSError) as e:
         print(f"Warning: DataLoader with {num_workers} workers failed: {e}")
@@ -84,7 +87,8 @@ def create_dataloaders(dataset, batch_size=16, train_split=0.95, num_workers=8,
         return _create_dataloaders_internal(
             dataset, batch_size, train_split, 0,
             group_key, seed, use_grouped_batching, groups_per_batch,
-            samples_per_group, debug_batch_stats, skip_empty_midi
+            samples_per_group, train_dataset_sampling_weights, train_dataset_sampling_exponent,
+            debug_batch_stats, skip_empty_midi
         )
 
 
@@ -92,6 +96,8 @@ def _create_dataloaders_internal(dataset, batch_size, train_split, num_workers,
                                 group_key=("track", "stem"), seed=42,
                                 use_grouped_batching=False,
                                 groups_per_batch=16, samples_per_group=2,
+                                train_dataset_sampling_weights=None,
+                                train_dataset_sampling_exponent=None,
                                 debug_batch_stats=False,
                                 skip_empty_midi=False):
     """
@@ -125,7 +131,7 @@ def _create_dataloaders_internal(dataset, batch_size, train_split, num_workers,
         )
 
     if grouped_enabled:
-        from mld.dataset.samplers import GroupedStemBatchSampler, collate_stem_grouped
+        from symb_guided_dis.dataset.samplers import GroupedStemBatchSampler, collate_stem_grouped
 
         print("Using grouped stem batching...")
         all_metadata = dataset.get_all_metadata()
@@ -137,6 +143,8 @@ def _create_dataloaders_internal(dataset, batch_size, train_split, num_workers,
             groups_per_batch=groups_per_batch,
             samples_per_group=samples_per_group,
             group_key=group_key,
+            dataset_sampling_weights=train_dataset_sampling_weights,
+            dataset_sampling_exponent=train_dataset_sampling_exponent,
             split="train",
             drop_last=False,
             shuffle=True,

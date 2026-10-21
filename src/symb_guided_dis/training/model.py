@@ -5,13 +5,7 @@ import torch.nn.functional as F
 import gin
 import copy
 
-from mld.autoencoder import (
-    build_latent_codec,
-    decode_model_latent_to_audio,
-    encode_audio_batch_to_model_latent,
-    encode_audio_to_model_latent,
-    normalize_latent_codec_name,
-)
+from symb_guided_dis.autoencoder import music2latent
 
 
 def _normalize_group_key(group_key):
@@ -41,6 +35,17 @@ def _resolve_metadata_group(meta, group_key):
     return meta[group_key]
 
 
+def _canonicalize_latent_normalization_mode(mode):
+    mode = str(mode).strip().lower()
+    valid_modes = {"dataset_per_channel", "sample", "none"}
+    if mode not in valid_modes:
+        raise ValueError(
+            "latent_normalization must be one of {none, sample, dataset_per_channel}, "
+            f"got {mode!r}."
+        )
+    return mode
+
+
 @gin.configurable
 class Base(nn.Module):
     """Base model for disentanglement - agnostic to decoder architecture."""
@@ -59,10 +64,11 @@ class Base(nn.Module):
         self.latent_dim = latent_dim
         self.drop_value = float(drop_value)
         self.use_raw_time_cond_if_no_encoder = bool(use_raw_time_cond_if_no_encoder)
-        self.latent_codec = normalize_latent_codec_name(latent_codec)
-        if self.latent_codec == "auto":
-            raise ValueError("Base.latent_codec cannot be 'auto'. Use an explicit codec name.")
-        
+        if str(latent_codec).strip().lower() != "music2latent":
+            raise ValueError(
+                "This project currently supports only the Music2Latent autoencoder; "
+                f"got latent_codec={latent_codec!r}."
+            )
         # Encoders (will be set via gin config)
         self.encoder = encoder
         self.encoder_time = encoder_time
@@ -77,6 +83,23 @@ class Base(nn.Module):
         """Get model device."""
         return next(self.parameters()).device
 
+    def _allowed_missing_state_keys(self):
+        return set()
+
+    def _load_state_dict_compat(self, state_dict, *, strict=True):
+        incompatible = self.load_state_dict(state_dict, strict=False)
+        allowed_missing = set(self._allowed_missing_state_keys())
+        missing = [key for key in incompatible.missing_keys if key not in allowed_missing]
+        unexpected = list(incompatible.unexpected_keys)
+        if strict and (missing or unexpected):
+            details = []
+            if missing:
+                details.append(f"missing keys: {missing}")
+            if unexpected:
+                details.append(f"unexpected keys: {unexpected}")
+            raise RuntimeError("State dict mismatch: " + "; ".join(details))
+        return incompatible
+
     def encode_structure(self, latent_time):
         """Encode structure conditioning from latents (keeps temporal info)."""
         if self.encoder_time is not None:
@@ -88,26 +111,13 @@ class Base(nn.Module):
     def _sample_struct_aug_latent(self, batch, latents):
         """Resolve one structure-augmentation latent per sample.
 
-        Supports both:
-        - legacy pre-selected `latent_struct_aug` shaped [B, C, T]
-        - bank-style `z_struct_aug` shaped [B, K, C, T]
+        The prepared dataset stores a bank under ``z_struct_aug`` with shape
+        ``[B, K, C, T]``; this method selects one valid augmentation per item.
         """
-        latent_struct_aug = batch.get("latent_struct_aug")
-        if latent_struct_aug is not None:
-            if latent_struct_aug.ndim != 3:
-                raise ValueError(
-                    f"'latent_struct_aug' must have shape [B, C, T], got {tuple(latent_struct_aug.shape)}"
-                )
-            if latent_struct_aug.shape != latents.shape:
-                raise ValueError(
-                    f"Shape mismatch: latent_struct_aug {tuple(latent_struct_aug.shape)} vs latent {tuple(latents.shape)}"
-                )
-            return latent_struct_aug
-
         struct_aug_bank = batch.get("z_struct_aug")
         if struct_aug_bank is None:
             raise ValueError(
-                "use_struct_aug=True requires either batch['z_struct_aug'] or batch['latent_struct_aug']. "
+                "use_struct_aug=True requires batch['z_struct_aug']. "
                 "Rebuild dataset with --save_struct_aug_latent."
             )
 
@@ -132,14 +142,30 @@ class Base(nn.Module):
         if bank_size <= 0:
             raise ValueError(f"'z_struct_aug' bank must have at least one augmentation, got shape {tuple(struct_aug_bank.shape)}")
 
-        choice_indices = torch.randint(
-            low=0,
-            high=bank_size,
-            size=(batch_size,),
-            device=struct_aug_bank.device,
-        )
+        valid_mask = batch.get("struct_aug_valid_mask")
+        if valid_mask is None:
+            valid_mask = torch.ones(
+                (batch_size, bank_size), device=struct_aug_bank.device, dtype=torch.bool
+            )
+        else:
+            valid_mask = valid_mask.to(device=struct_aug_bank.device, dtype=torch.bool)
+            if valid_mask.shape != (batch_size, bank_size):
+                raise ValueError(
+                    "'struct_aug_valid_mask' must have shape [B, K] matching z_struct_aug; "
+                    f"got {tuple(valid_mask.shape)} for bank {tuple(struct_aug_bank.shape)}"
+                )
+
+        has_valid_choice = valid_mask.any(dim=1)
+        # Argmax over independent uniform scores gives a uniform draw from the
+        # valid positions, without changing the fixed-size augmentation bank.
+        choice_scores = torch.rand((batch_size, bank_size), device=struct_aug_bank.device)
+        choice_scores.masked_fill_(~valid_mask, -1.0)
+        choice_indices = choice_scores.argmax(dim=1)
         batch_indices = torch.arange(batch_size, device=struct_aug_bank.device)
-        return struct_aug_bank[batch_indices, choice_indices]
+        sampled = struct_aug_bank[batch_indices, choice_indices]
+        if not bool(has_valid_choice.all()):
+            sampled = torch.where(has_valid_choice.view(batch_size, 1, 1), sampled, latents)
+        return sampled
 
     def get_timbre_source(self, latent_cond, batch):
         """Resolve the configured timbre source from the current batch."""
@@ -274,14 +300,13 @@ class Base(nn.Module):
 
     def build_latent_codec(self, device=None):
         codec_device = device if device is not None else self.device
-        return build_latent_codec(self.latent_codec, device=codec_device)
+        return music2latent.build(device=codec_device)
 
     def encode_audio_to_model_latent(self, waveform, codec=None, device=None):
         codec = self.build_latent_codec(device=device) if codec is None else codec
         target_device = device if device is not None else self.device
-        return encode_audio_to_model_latent(
+        return music2latent.encode_audio(
             codec,
-            self.latent_codec,
             waveform,
             latent_dim=self.latent_dim,
             device=target_device,
@@ -290,9 +315,8 @@ class Base(nn.Module):
     def encode_audio_batch_to_model_latent(self, waveforms, codec=None, device=None):
         codec = self.build_latent_codec(device=device) if codec is None else codec
         target_device = device if device is not None else self.device
-        return encode_audio_batch_to_model_latent(
+        return music2latent.encode_audio_batch(
             codec,
-            self.latent_codec,
             waveforms,
             latent_dim=self.latent_dim,
             device=target_device,
@@ -300,9 +324,8 @@ class Base(nn.Module):
 
     def decode_model_latent_to_audio(self, latent_batch, codec=None):
         codec = self.build_latent_codec() if codec is None else codec
-        return decode_model_latent_to_audio(
+        return music2latent.decode_audio(
             codec,
-            self.latent_codec,
             latent_batch,
             latent_dim=self.latent_dim,
         )
@@ -346,15 +369,6 @@ class Base(nn.Module):
         from tqdm import tqdm
 
         opt = self.configure_optimizers(lr=learning_rate)
-        
-        # Optional EMA setup
-        use_ema = (ema_decay is not None) and (float(ema_decay) > 0.0)
-        ema_decay = float(ema_decay)
-        ema_model = None
-        if use_ema:
-            ema_model = copy.deepcopy(self).eval().to(self.device)
-            for p in ema_model.parameters():
-                p.requires_grad_(False)
 
         def _ema_update(ema_m, online_m, decay):
             """Update EMA model parameters + buffers in-place."""
@@ -375,6 +389,7 @@ class Base(nn.Module):
         if not hasattr(self, "_global_step"):
             self._global_step = 0
         start_epoch = 1
+        ckpt = None
 
         if resume_from_checkpoint is not None:
             checkpoint_path = os.fspath(resume_from_checkpoint)
@@ -387,7 +402,7 @@ class Base(nn.Module):
                 raise KeyError(
                     f"Checkpoint {checkpoint_path} has no 'model_state_dict'; cannot resume training."
                 )
-            self.load_state_dict(state_dict)
+            self._load_state_dict_compat(state_dict, strict=True)
 
             optimizer_state = ckpt.get("optimizer_state_dict")
             if optimizer_state is None:
@@ -416,18 +431,29 @@ class Base(nn.Module):
             if saved_best is not None:
                 best_val = float(saved_best)
 
-            if use_ema:
-                ema_state = ckpt.get("ema_state_dict")
-                if ema_state is not None:
-                    ema_model.load_state_dict(ema_state)
-                else:
-                    print("Warning: checkpoint has no ema_state_dict; initialized EMA from current model.")
-
             print(
                 f"Resumed training from {checkpoint_path} "
                 f"(checkpoint_epoch={ckpt_epoch}, start_epoch={start_epoch}, "
                 f"global_step={self._global_step})."
             )
+
+        if hasattr(self, "ensure_latent_normalization_initialized"):
+            self.ensure_latent_normalization_initialized(dataloader)
+
+        # Optional EMA setup
+        use_ema = (ema_decay is not None) and (float(ema_decay) > 0.0)
+        ema_decay = float(ema_decay)
+        ema_model = None
+        if use_ema:
+            ema_model = copy.deepcopy(self).eval().to(self.device)
+            for p in ema_model.parameters():
+                p.requires_grad_(False)
+            if ckpt is not None:
+                ema_state = ckpt.get("ema_state_dict")
+                if ema_state is not None:
+                    ema_model._load_state_dict_compat(ema_state, strict=False)
+                else:
+                    print("Warning: checkpoint has no ema_state_dict; initialized EMA from current model.")
 
         if start_epoch > int(epochs):
             print(
@@ -549,10 +575,10 @@ class Base(nn.Module):
                     # Gin can emit transient shortened selectors for this module
                     # (for example ``musdis2.RectifiedFlow``) in operative configs.
                     # Normalize them so saved run configs remain parseable
-                    # through the canonical ``mld.pipeline.model`` path.
+                    # through the canonical ``symb_guided_dis.training.model`` path.
                     operative_config = operative_config.replace(
                         "musdis2.",
-                        "mld.pipeline.model.",
+                        "symb_guided_dis.training.model.",
                     )
                     model_class_line = (
                         f"model_class = @{self.__class__.__module__}.{self.__class__.__name__}\n"
@@ -583,6 +609,7 @@ class Base(nn.Module):
                             "epochs": epochs,
                             "ema_decay": float(ema_decay),
                             "grad_clip_max_norm": float(grad_clip_max_norm) if grad_clip_max_norm is not None else None,
+                            "latent_normalization": getattr(self, "latent_normalization", "none"),
                         }
                     }
                     if use_ema:
@@ -607,10 +634,12 @@ class RectifiedFlow(Base):
                  use_cross_timbre_cond=False,
                  use_timbre_aug=False,
                  timbre_aug_input_key="z_timbre_aug",
+                 timbre_aug_is_latent=None,
                  timbre_aug_prob=1.0,
                  timbre_aug_train_only=True,
                  use_struct_aug=False,
                  use_struct_aug_time_cond=True,
+                 struct_aug_prob=1.0,
                  use_timbre_triplet=False,
                  timbre_triplet_weight=0.0,
                  timbre_triplet_margin=0.2,
@@ -635,7 +664,7 @@ class RectifiedFlow(Base):
         if num_flow_steps <= 0:
             raise ValueError(f"num_flow_steps must be > 0, got {num_flow_steps}")
 
-        self.latent_normalization = str(latent_normalization).lower()
+        self.latent_normalization = _canonicalize_latent_normalization_mode(latent_normalization)
         self.timbre_input_key = str(timbre_input_key)
         self.group_key = _normalize_group_key(group_key)
         self.time_cond_drop_rate = float(time_cond_drop_rate)
@@ -643,10 +672,17 @@ class RectifiedFlow(Base):
         self.use_cross_timbre_cond = bool(use_cross_timbre_cond)
         self.use_timbre_aug = bool(use_timbre_aug)
         self.timbre_aug_input_key = str(timbre_aug_input_key)
+        # Existing M2L augmentation banks contain [B, K, C, T] latents and
+        # must share the latent normalization path. Precomputed feature banks
+        # such as CLAP contain [B, K, D] vectors and must be left untouched.
+        if timbre_aug_is_latent is None:
+            timbre_aug_is_latent = self.timbre_input_key == "latent"
+        self.timbre_aug_is_latent = bool(timbre_aug_is_latent)
         self.timbre_aug_prob = float(timbre_aug_prob)
         self.timbre_aug_train_only = bool(timbre_aug_train_only)
         self.use_struct_aug = bool(use_struct_aug)
         self.use_struct_aug_time_cond = bool(use_struct_aug_time_cond)
+        self.struct_aug_prob = float(struct_aug_prob)
         self.use_timbre_triplet = bool(use_timbre_triplet)
         self.timbre_triplet_weight = float(timbre_triplet_weight)
         self.timbre_triplet_margin = float(timbre_triplet_margin)
@@ -670,12 +706,9 @@ class RectifiedFlow(Base):
         self._stage1_timbre_frozen = None
         self._warned_missing_group_ids = False
         self._warned_missing_timbre_aug = False
-
-        if self.latent_normalization not in {"sample", "none"}:
-            raise ValueError(
-                "latent_normalization must be one of {sample, none}, "
-                f"got {latent_normalization!r}."
-            )
+        self.register_buffer("latent_mean", torch.zeros(1, int(self.latent_dim), 1))
+        self.register_buffer("latent_std", torch.ones(1, int(self.latent_dim), 1))
+        self.register_buffer("latent_stats_ready", torch.tensor(self.latent_normalization != "dataset_per_channel"))
         if self.use_timbre_triplet:
             if self.timbre_triplet_weight <= 0.0:
                 raise ValueError("use_timbre_triplet=True requires timbre_triplet_weight > 0.")
@@ -691,14 +724,14 @@ class RectifiedFlow(Base):
             if not self.use_struct_aug:
                 raise ValueError("use_timbre_triplet=True requires use_struct_aug=True.")
         if self.use_timbre_aug:
-            if self.timbre_input_key != "latent":
-                raise ValueError(
-                    "use_timbre_aug=True currently requires timbre_input_key=latent."
-                )
             if self.timbre_aug_prob < 0.0 or self.timbre_aug_prob > 1.0:
                 raise ValueError(
                     f"timbre_aug_prob must be in [0, 1], got {self.timbre_aug_prob}."
                 )
+        if self.struct_aug_prob < 0.0 or self.struct_aug_prob > 1.0:
+            raise ValueError(
+                f"struct_aug_prob must be in [0, 1], got {self.struct_aug_prob}."
+            )
         if self.timbre_input_key == "none":
             if self.encoder is not None:
                 raise ValueError("timbre_input_key=none requires encoder=None.")
@@ -727,6 +760,175 @@ class RectifiedFlow(Base):
             )
 
         self.to(self._target_device)
+
+    def _allowed_missing_state_keys(self):
+        allowed = super()._allowed_missing_state_keys()
+        return allowed.union({"latent_mean", "latent_std", "latent_stats_ready"})
+
+    def _set_dataset_latent_stats(self, mean, std):
+        mean = torch.as_tensor(mean, device=self.latent_mean.device, dtype=self.latent_mean.dtype)
+        std = torch.as_tensor(std, device=self.latent_std.device, dtype=self.latent_std.dtype)
+        if mean.shape != self.latent_mean.shape:
+            raise ValueError(
+                f"latent mean must have shape {tuple(self.latent_mean.shape)}, got {tuple(mean.shape)}"
+            )
+        if std.shape != self.latent_std.shape:
+            raise ValueError(
+                f"latent std must have shape {tuple(self.latent_std.shape)}, got {tuple(std.shape)}"
+            )
+        self.latent_mean.copy_(mean)
+        self.latent_std.copy_(std.clamp_min(1e-6))
+        self.latent_stats_ready.fill_(True)
+
+    def has_fixed_latent_stats(self):
+        return bool(self.latent_normalization == "dataset_per_channel" and bool(self.latent_stats_ready.item()))
+
+    @staticmethod
+    def _sample_latent_stats(latents):
+        if latents.ndim != 3:
+            raise ValueError(f"Expected latents with shape [B, C, T], got {tuple(latents.shape)}")
+        mean = latents.mean(dim=(1, 2), keepdim=True)
+        std = latents.std(dim=(1, 2), keepdim=True).clamp_min(1e-6)
+        return {"mean": mean, "std": std}
+
+    def normalize_latent_for_model(self, latents, return_stats=False):
+        latents = torch.as_tensor(latents, dtype=torch.float32, device=self.device)
+        if latents.ndim not in {3, 4}:
+            raise ValueError(f"Expected latent tensor with shape [B, C, T] or [B, K, C, T], got {tuple(latents.shape)}")
+
+        if self.latent_normalization == "none":
+            return (latents, None) if return_stats else latents
+
+        if self.latent_normalization == "sample":
+            if latents.ndim == 4:
+                flat = latents.reshape(-1, latents.shape[-2], latents.shape[-1])
+                stats = self._sample_latent_stats(flat)
+                normalized = ((flat - stats["mean"]) / stats["std"]).reshape_as(latents)
+                if return_stats:
+                    reshaped_stats = {
+                        "mean": stats["mean"].reshape(latents.shape[0], latents.shape[1], 1, 1),
+                        "std": stats["std"].reshape(latents.shape[0], latents.shape[1], 1, 1),
+                    }
+                    return normalized, reshaped_stats
+                return normalized
+
+            stats = self._sample_latent_stats(latents)
+            normalized = (latents - stats["mean"]) / stats["std"]
+            return (normalized, stats) if return_stats else normalized
+
+        if not self.has_fixed_latent_stats():
+            raise RuntimeError(
+                "dataset_per_channel normalization requested, but latent statistics are not initialized yet. "
+                "Call ensure_latent_normalization_initialized(...) before training or inference."
+            )
+
+        normalized = (latents - self.latent_mean) / self.latent_std
+        return (normalized, None) if return_stats else normalized
+
+    def denormalize_latent_from_model(self, latents, latent_stats=None):
+        latents = torch.as_tensor(latents, dtype=torch.float32, device=self.device)
+        if self.latent_normalization == "none":
+            return latents
+        if self.latent_normalization == "sample":
+            if latent_stats is None:
+                raise ValueError(
+                    "Per-sample latent normalization requires explicit latent_stats for denormalization. "
+                    "This is intentionally explicit to avoid hidden transfer pathways."
+                )
+            return latents * latent_stats["std"].to(device=latents.device, dtype=latents.dtype) + latent_stats["mean"].to(device=latents.device, dtype=latents.dtype)
+        if not self.has_fixed_latent_stats():
+            raise RuntimeError(
+                "dataset_per_channel normalization requested, but latent statistics are not initialized yet."
+            )
+        return latents * self.latent_std.to(device=latents.device, dtype=latents.dtype) + self.latent_mean.to(device=latents.device, dtype=latents.dtype)
+
+    def _iter_train_latents_for_normalization(self, dataloader):
+        if dataloader is None:
+            raise ValueError("A training dataloader is required to initialize dataset-wide latent normalization.")
+
+        dataset = dataloader.dataset
+        if hasattr(dataset, "indices") and hasattr(dataset, "dataset"):
+            indices = list(dataset.indices)
+            base_dataset = dataset.dataset
+        else:
+            batch_sampler = getattr(dataloader, "batch_sampler", None)
+            if batch_sampler is not None and hasattr(batch_sampler, "valid_groups") and hasattr(batch_sampler, "group_indices"):
+                index_set = set()
+                for group_id in batch_sampler.valid_groups:
+                    index_set.update(batch_sampler.group_indices[group_id])
+                indices = sorted(index_set)
+                base_dataset = dataset
+            else:
+                indices = list(range(len(dataset)))
+                base_dataset = dataset
+
+        if not indices:
+            raise ValueError("No training latents were found for dataset-wide normalization.")
+
+        for idx in indices:
+            sample = base_dataset[idx]
+            latent = sample.get("latent")
+            if latent is None:
+                continue
+            latent = torch.as_tensor(latent, dtype=torch.float32)
+            if latent.ndim == 2:
+                latent = latent.unsqueeze(0)
+            if latent.ndim != 3 or latent.shape[1] != int(self.latent_dim):
+                raise ValueError(
+                    f"Expected training latent shape [B, {self.latent_dim}, T], got {tuple(latent.shape)}"
+                )
+            yield latent
+
+    @staticmethod
+    def _close_dataloader_dataset_envs(dataloader):
+        if dataloader is None:
+            return
+
+        candidates = []
+        dataset = getattr(dataloader, "dataset", None)
+        if dataset is not None:
+            candidates.append(dataset)
+            base_dataset = getattr(dataset, "dataset", None)
+            if base_dataset is not None:
+                candidates.append(base_dataset)
+
+        seen = set()
+        for candidate in candidates:
+            if candidate is None:
+                continue
+            ident = id(candidate)
+            if ident in seen:
+                continue
+            seen.add(ident)
+            close_env = getattr(candidate, "close_env", None)
+            if callable(close_env):
+                close_env()
+
+    def ensure_latent_normalization_initialized(self, dataloader):
+        if self.latent_normalization != "dataset_per_channel" or self.has_fixed_latent_stats():
+            return
+
+        sum_c = torch.zeros(int(self.latent_dim), dtype=torch.float64)
+        sumsq_c = torch.zeros(int(self.latent_dim), dtype=torch.float64)
+        token_count = 0
+
+        for latent in self._iter_train_latents_for_normalization(dataloader):
+            sum_c += latent.sum(dim=(0, 2), dtype=torch.float64)
+            sumsq_c += (latent * latent).sum(dim=(0, 2), dtype=torch.float64)
+            token_count += int(latent.shape[0] * latent.shape[-1])
+
+        if token_count <= 0:
+            raise ValueError("Unable to initialize dataset-wide latent normalization: found zero latent tokens.")
+
+        mean = (sum_c / float(token_count)).to(dtype=torch.float32).view(1, int(self.latent_dim), 1)
+        var = (sumsq_c / float(token_count)) - (sum_c / float(token_count)).pow(2)
+        std = var.clamp_min(1e-12).sqrt().to(dtype=torch.float32).view(1, int(self.latent_dim), 1)
+        self._set_dataset_latent_stats(mean, std)
+        self._close_dataloader_dataset_envs(dataloader)
+        print(
+            "Initialized dataset-wide per-channel latent normalization "
+            f"from {token_count} latent frames."
+        )
 
     @staticmethod
     def _extract_group_ids(batch_obj, group_key, device):
@@ -872,7 +1074,7 @@ class RectifiedFlow(Base):
         if "midi_roll" not in batch:
             raise ValueError(
                 "structure pitch supervision/debug requires batch[midi_roll]. "
-                "Rebuild dataset with --save_midi."
+                "Rebuild the dataset with scripts.prepare_dataset."
             )
         midi_roll = batch["midi_roll"]
         if midi_roll.ndim != 3:
@@ -960,11 +1162,7 @@ class RectifiedFlow(Base):
             print(f"Stage 2 reached at global_step={global_step}: timbre encoder unfrozen.")
 
     def _normalize_latents(self, latents):
-        if self.latent_normalization == "none":
-            return latents
-        return (latents - latents.mean(dim=(1, 2), keepdim=True)) / (
-            latents.std(dim=(1, 2), keepdim=True) + 1e-6
-        )
+        return self.normalize_latent_for_model(latents)
 
     def forward(self, latents, timesteps, time_cond=None, cond=None):
         return self.net(latents, timesteps=timesteps, cond=cond, time_cond=time_cond)
@@ -991,13 +1189,13 @@ class RectifiedFlow(Base):
         if self.training:
             effective_time_cond_drop_rate = self._current_time_cond_drop_rate(global_step)
 
-        latents = batch["latent"]
-        if latents.ndim != 3:
+        raw_latents = batch["latent"]
+        if raw_latents.ndim != 3:
             raise ValueError(
-                f"RectifiedFlow expects latents with shape [B, C, T], got {tuple(latents.shape)}"
+                f"RectifiedFlow expects latents with shape [B, C, T], got {tuple(raw_latents.shape)}"
             )
 
-        latents = self._normalize_latents(latents)
+        latents = self.normalize_latent_for_model(raw_latents)
         current_batch_size = latents.shape[0]
 
         latent_time = latents
@@ -1011,17 +1209,25 @@ class RectifiedFlow(Base):
         timbre_aug_bank = None
         if timbre_source is not None and (self.training or not self.timbre_aug_train_only):
             timbre_aug_bank = self.get_timbre_aug_bank(batch, timbre_source)
+            if timbre_aug_bank is not None and self.timbre_aug_is_latent:
+                timbre_aug_bank = self.normalize_latent_for_model(timbre_aug_bank)
 
         need_struct_aug_latent = self.use_struct_aug and (
             (self.training and self.use_struct_aug_time_cond) or self.use_timbre_triplet
         )
         latent_struct_aug = None
         if need_struct_aug_latent:
-            latent_struct_aug = self._sample_struct_aug_latent(batch, latents)
-            latent_struct_aug = self._normalize_latents(latent_struct_aug)
+            latent_struct_aug = self._sample_struct_aug_latent(batch, raw_latents)
+            latent_struct_aug = self.normalize_latent_for_model(latent_struct_aug)
 
         if self.use_struct_aug and self.use_struct_aug_time_cond and self.training:
-            latent_time = latent_struct_aug
+            if self.struct_aug_prob >= 1.0:
+                latent_time = latent_struct_aug
+            elif self.struct_aug_prob > 0.0:
+                struct_aug_mask = (
+                    torch.rand(current_batch_size, device=latents.device) < self.struct_aug_prob
+                ).view(current_batch_size, 1, 1)
+                latent_time = torch.where(struct_aug_mask, latent_struct_aug, latents)
 
         group_ids = self._extract_group_ids(batch, self.group_key, device=latents.device)
 
@@ -1135,7 +1341,7 @@ class RectifiedFlow(Base):
             batch_size = current_batch_size
             device = latents.device
 
-            if self.encoder_time is not None and effective_time_cond_drop_rate > 0.0 and (time_cond_for_model is not None):
+            if effective_time_cond_drop_rate > 0.0 and (time_cond_for_model is not None):
                 drop_mask = (torch.rand(batch_size, device=device) < effective_time_cond_drop_rate)
                 drop_mask = drop_mask.view(batch_size, 1, 1)
                 dropped = torch.full_like(time_cond_for_model, self.drop_value)
@@ -1257,6 +1463,8 @@ class RectifiedFlow(Base):
         guidance_timbre=None,
         guidance_structure=None,
         seed=None,
+        output_space="model",
+        latent_stats=None,
     ):
         if num_inference_steps is None:
             num_inference_steps = self.num_flow_steps
@@ -1311,10 +1519,23 @@ class RectifiedFlow(Base):
             else:
                 x = x_euler
 
-        return x
+        output_space = str(output_space).lower()
+        if output_space == "model":
+            return x
+        if output_space == "raw":
+            return self.denormalize_latent_from_model(x, latent_stats=latent_stats)
+        raise ValueError(f"Unknown output_space {output_space!r}. Expected one of {{'model', 'raw'}}.")
 
     @torch.no_grad()
-    def sample(self, time_source, cond_source, num_inference_steps=None, deterministic=False):
+    def sample(
+        self,
+        time_source,
+        cond_source,
+        num_inference_steps=None,
+        deterministic=False,
+        output_space="raw",
+        output_latent_stats=None,
+    ):
         self.eval()
 
         if num_inference_steps is None:
@@ -1323,11 +1544,19 @@ class RectifiedFlow(Base):
         if num_inference_steps <= 0:
             raise ValueError(f"num_inference_steps must be > 0, got {num_inference_steps}")
 
-        time_cond = None
-        if self.encoder_time is not None and time_source is not None:
-            time_cond = self.encode_structure(time_source)
+        time_source_for_model = None
+        if time_source is not None:
+            time_source_for_model = self.normalize_latent_for_model(time_source)
 
-        cond = self.encode_timbre(cond_source)
+        cond_source_for_model = cond_source
+        if cond_source is not None and hasattr(cond_source, "ndim") and int(cond_source.ndim) == 3:
+            cond_source_for_model = self.normalize_latent_for_model(cond_source)
+
+        time_cond = None
+        if time_source_for_model is not None:
+            time_cond = self.encode_structure(time_source_for_model)
+
+        cond = self.encode_timbre(cond_source_for_model)
 
         if time_source is not None:
             latent_shape = tuple(time_source.shape)
@@ -1345,4 +1574,6 @@ class RectifiedFlow(Base):
             guidance_timbre=self.flow_guidance_timbre,
             guidance_structure=self.flow_guidance_structure,
             seed=None,
+            output_space=output_space,
+            latent_stats=output_latent_stats,
         )

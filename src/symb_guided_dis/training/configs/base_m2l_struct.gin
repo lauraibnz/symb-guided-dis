@@ -1,0 +1,132 @@
+from __gin__ import dynamic_registration
+
+import symb_guided_dis
+import symb_guided_dis.training.model
+import symb_guided_dis.training.networks
+import symb_guided_dis.training.utils
+
+# music2latent latent layout: [64, T]
+LATENT_DIM = 64
+TIMBRE_DIM = 128
+FLOW_STEPS = 50
+FLOW_SOLVER = "heun"
+FLOW_GUIDANCE_TIMBRE = 1.0
+FLOW_GUIDANCE_STRUCTURE = 1.0
+TIMBRE_INPUT_KEY = "latent"
+
+# Training/data setup
+USE_GROUPED_BATCHING = True
+USE_CROSS_TIMBRE_COND = True
+USE_TIMBRE_AUG = True
+USE_STRUCT_AUG = True
+USE_STRUCT_AUG_TIME_COND = True
+# Direct M2L conditioning has no learned structure encoder, so the encoder-only
+# structure pitch probe is unavailable.
+USE_STRUCTURE_PITCH_LOSS = False
+LOG_STRUCTURE_PITCH_DEBUG = False
+
+# Batching
+GROUP_KEY = ["track", "stem"]
+GROUPS_PER_BATCH = 32
+SAMPLES_PER_GROUP = 4
+DEBUG_BATCH_STATS = False
+
+# Conditioning dropout
+COND_DROP_RATE = 0.1
+TIME_COND_DROP_RATE = 0.1
+
+# Timbre triplet supervision
+TIMBRE_TRIPLET_WEIGHT = 0.1
+TIMBRE_TRIPLET_MARGIN = 0.2
+
+### ARCHITECTURE ###
+
+encoder/symb_guided_dis.training.networks.Encoder1D:
+    in_channels = %LATENT_DIM
+    channels = [128, 256, 512, %TIMBRE_DIM]
+    kernel_size = 3
+    strides = [1, 1, 1, 1]
+    average_out = True
+    use_tanh = False
+
+symb_guided_dis.training.networks.DiffusionTransformer1D:
+    in_channels = %LATENT_DIM
+    out_channels = %LATENT_DIM
+    model_dim = 512
+    num_layers = 8
+    mlp_ratio = 4.0
+    cond_channels = %TIMBRE_DIM
+    # Use normalized music2latent latents directly for temporal structure conditioning.
+    time_cond_channels = %LATENT_DIM
+    time_embed_dim = 128
+    attention_heads = 8
+    dropout = 0.1
+    attention_dropout = 0.0
+    pos_embedding_type = "rope"
+    max_seq_len = 2048
+    # Plain conditioning path:
+    # - timestep + global timbre through AdaLN-Zero
+    # - temporally aligned direct M2L structure through standard cross-attention
+    use_time_cond_cross_attention_rope = True
+    use_time_cond_cross_attention_correction = False
+    time_cond_correction_scale = 0.05
+    time_cond_gate_init_bias = -5.0
+    use_cond_input = False
+    use_cond_in_mlp = False
+    use_adaLN_zero = True
+
+### MODEL ###
+
+model_class = @symb_guided_dis.training.model.RectifiedFlow
+
+symb_guided_dis.training.model.RectifiedFlow:
+    net = @symb_guided_dis.training.networks.DiffusionTransformer1D()
+    encoder = @encoder/symb_guided_dis.training.networks.Encoder1D()
+    encoder_time = None
+    use_raw_time_cond_if_no_encoder = True
+    latent_dim = %LATENT_DIM
+    latent_normalization = "dataset_per_channel"
+    timbre_input_key = %TIMBRE_INPUT_KEY
+    num_flow_steps = %FLOW_STEPS
+    flow_solver = %FLOW_SOLVER
+    flow_guidance_timbre = %FLOW_GUIDANCE_TIMBRE
+    flow_guidance_structure = %FLOW_GUIDANCE_STRUCTURE
+    drop_value = -4.0
+    group_key = %GROUP_KEY
+
+    use_cross_timbre_cond = %USE_CROSS_TIMBRE_COND
+    use_timbre_aug = %USE_TIMBRE_AUG
+    use_struct_aug = %USE_STRUCT_AUG
+    use_struct_aug_time_cond = %USE_STRUCT_AUG_TIME_COND
+    use_timbre_triplet = True
+    timbre_triplet_weight = %TIMBRE_TRIPLET_WEIGHT
+    timbre_triplet_margin = %TIMBRE_TRIPLET_MARGIN
+
+    cond_drop_rate = %COND_DROP_RATE
+    time_cond_drop_rate = %TIME_COND_DROP_RATE
+    use_staged_time_cond_drop = False
+    stage2_start_step = 0
+    time_cond_drop_rate_stage2 = 0.0
+    freeze_timbre_encoder_in_stage1 = False
+
+    use_structure_pitch_loss = %USE_STRUCTURE_PITCH_LOSS
+    structure_pitch_head = None
+    structure_pitch_weight = 0.0
+    structure_pitch_pos_weight = None
+    log_structure_pitch_debug = %LOG_STRUCTURE_PITCH_DEBUG
+
+symb_guided_dis.training.model.RectifiedFlow.fit.grad_clip_max_norm = 0.5
+symb_guided_dis.training.model.RectifiedFlow.fit.ema_decay = 0.999
+symb_guided_dis.training.model.RectifiedFlow.fit.train_steps_per_epoch = None
+symb_guided_dis.training.model.RectifiedFlow.fit.val_steps_per_epoch = None
+symb_guided_dis.training.model.RectifiedFlow.fit.save_every = 20
+
+### DATALOADER ###
+
+symb_guided_dis.training.utils.create_dataloaders:
+    use_grouped_batching = %USE_GROUPED_BATCHING
+    group_key = %GROUP_KEY
+    groups_per_batch = %GROUPS_PER_BATCH
+    samples_per_group = %SAMPLES_PER_GROUP
+    debug_batch_stats = %DEBUG_BATCH_STATS
+    skip_empty_midi = True

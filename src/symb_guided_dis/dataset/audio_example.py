@@ -4,7 +4,7 @@ import numpy as np
 
 
 class AudioExample:
-    """Container for audio data, arrays, and metadata - inspired by AFTER's design."""
+    """Container for audio data, arrays, and metadata."""
     
     def __init__(self, output_type="torch"):
         self.output_type = output_type
@@ -21,7 +21,7 @@ class AudioExample:
             self.arrays[key] = torch.from_numpy(array)
     
     def get(self, key, default=None, output_type=None):
-        """Get an array with flexible output type (unified interface like AFTER)."""
+        """Get an array with the requested output type."""
         if key not in self.arrays:
             return default
         
@@ -67,3 +67,19 @@ class AudioExample:
         example.arrays = obj_dict.get('arrays', {})
         example.metadata = obj_dict.get('metadata', {})
         return example
+
+
+def save_many_to_lmdb(env, entries):
+    """Save a batch of ``(key, AudioExample)`` pairs in one transaction."""
+    if not entries:
+        return
+    with env.begin(write=True) as txn:
+        for key, example in entries:
+            txn.put(str(key).encode(), example.to_bytes())
+
+
+def load_from_lmdb(env, key):
+    """Load an ``AudioExample`` from an LMDB key."""
+    with env.begin() as txn:
+        data = txn.get(key.encode())
+        return None if data is None else AudioExample.from_bytes(data)

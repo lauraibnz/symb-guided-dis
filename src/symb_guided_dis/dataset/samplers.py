@@ -46,6 +46,8 @@ class GroupedStemBatchSampler(Sampler):
         groups_per_batch=16,
         samples_per_group=2,
         group_key=("track", "stem"),
+        dataset_sampling_weights=None,
+        dataset_sampling_exponent=None,
         split=None,
         drop_last=True,
         shuffle=True,
@@ -54,6 +56,19 @@ class GroupedStemBatchSampler(Sampler):
         self.groups_per_batch = int(groups_per_batch)
         self.samples_per_group = int(samples_per_group)
         self.group_key = tuple(group_key) if isinstance(group_key, (list, tuple)) else str(group_key)
+        self.dataset_sampling_weights = self._normalize_dataset_sampling_weights(
+            dataset_sampling_weights
+        )
+        self.dataset_sampling_exponent = self._normalize_dataset_sampling_exponent(
+            dataset_sampling_exponent
+        )
+        if (
+            self.dataset_sampling_weights is not None
+            and self.dataset_sampling_exponent is not None
+        ):
+            raise ValueError(
+                "Specify either dataset_sampling_weights or dataset_sampling_exponent, not both."
+            )
         self.drop_last = bool(drop_last)
         self.shuffle = bool(shuffle)
         self.seed = seed
@@ -61,6 +76,7 @@ class GroupedStemBatchSampler(Sampler):
         self.allowed_indices = set(allowed_indices) if allowed_indices is not None else None
 
         self.group_indices = defaultdict(list)
+        self.group_dataset_ids = {}
         for idx, meta in enumerate(metadata_list):
             if not meta:
                 continue
@@ -73,12 +89,38 @@ class GroupedStemBatchSampler(Sampler):
             except ValueError:
                 continue
             self.group_indices[group_id].append(idx)
+            dataset_id = meta.get("dataset_id")
+            previous_dataset_id = self.group_dataset_ids.setdefault(group_id, dataset_id)
+            if previous_dataset_id != dataset_id:
+                raise ValueError(
+                    f"Group {group_id!r} spans dataset IDs {previous_dataset_id!r} and {dataset_id!r}. "
+                    "Use a dataset-qualified group key."
+                )
 
         self.valid_groups = [
             group_id
             for group_id, indices in self.group_indices.items()
             if len(indices) >= self.samples_per_group
         ]
+        self.valid_groups_by_dataset = defaultdict(list)
+        for group_id in self.valid_groups:
+            self.valid_groups_by_dataset[self.group_dataset_ids[group_id]].append(group_id)
+        self.eligible_chunk_counts_by_dataset = {
+            dataset_id: sum(
+                len(self.group_indices[group_id])
+                for group_id in group_ids
+            )
+            for dataset_id, group_ids in self.valid_groups_by_dataset.items()
+        }
+        if self.dataset_sampling_exponent is not None:
+            # Use only chunks that can actually participate in this grouped
+            # sampler: selected split, optional non-empty-MIDI filter, and
+            # groups with >=K chunks.
+            self.dataset_sampling_weights = {
+                dataset_id: float(chunk_count) ** self.dataset_sampling_exponent
+                for dataset_id, chunk_count in self.eligible_chunk_counts_by_dataset.items()
+            }
+        self._validate_dataset_sampling_weights()
 
         if len(self.valid_groups) < self.groups_per_batch:
             print(
@@ -94,6 +136,18 @@ class GroupedStemBatchSampler(Sampler):
         print(f"Split: {self.split if self.split is not None else 'all'}")
         print(f"group_key={self.group_key}")
         print(f"Valid groups (>={self.samples_per_group} chunks): {len(self.valid_groups)}")
+        if self.dataset_sampling_weights is not None:
+            print(
+                "Valid groups by dataset: "
+                f"{ {dataset_id: len(groups) for dataset_id, groups in self.valid_groups_by_dataset.items()} }"
+            )
+            print(f"Eligible chunks by dataset: {self.eligible_chunk_counts_by_dataset}")
+            if self.dataset_sampling_exponent is not None:
+                print(
+                    "Dataset sampling policy: "
+                    f"P(dataset) ∝ eligible_train_chunks ** {self.dataset_sampling_exponent:g}"
+                )
+            print(f"Dataset group sampling weights: {self.dataset_sampling_weights}")
         print(f"Batch config: G={self.groups_per_batch}, K={self.samples_per_group}")
         print(f"Effective batch size: {self.groups_per_batch * self.samples_per_group}")
 
@@ -101,6 +155,84 @@ class GroupedStemBatchSampler(Sampler):
         self.epoch = int(epoch)
         if self.seed is not None:
             self.rng = random.Random(self.seed + self.epoch)
+
+    @staticmethod
+    def _normalize_dataset_sampling_weights(weights):
+        if weights is None:
+            return None
+        if not isinstance(weights, dict) or not weights:
+            raise ValueError("dataset_sampling_weights must be a non-empty mapping or None.")
+        normalized = {str(dataset_id): float(weight) for dataset_id, weight in weights.items()}
+        if any(weight <= 0.0 for weight in normalized.values()):
+            raise ValueError("dataset_sampling_weights must contain only positive weights.")
+        return normalized
+
+    @staticmethod
+    def _normalize_dataset_sampling_exponent(exponent):
+        if exponent is None:
+            return None
+        exponent = float(exponent)
+        if not 0.0 <= exponent <= 1.0:
+            raise ValueError(
+                "dataset_sampling_exponent must be in [0, 1]: "
+                "0 is uniform over datasets and 1 is proportional to eligible chunks. "
+                f"Got {exponent}."
+            )
+        return exponent
+
+    def _validate_dataset_sampling_weights(self):
+        if self.dataset_sampling_weights is None:
+            return
+        available = set(self.valid_groups_by_dataset)
+        requested = set(self.dataset_sampling_weights)
+        if available != requested:
+            raise ValueError(
+                "dataset_sampling_weights must name exactly the datasets with valid groups for this split; "
+                f"available={sorted(str(name) for name in available)}, "
+                f"requested={sorted(self.dataset_sampling_weights)}."
+            )
+
+    def _balanced_epoch_groups(self):
+        """Return one epoch's groups with the requested dataset proportions.
+
+        The epoch retains the usual number of group draws. Datasets with too
+        few valid groups are repeated as needed; larger datasets are
+        downsampled for that epoch. Explicit weights therefore make corpus mass
+        independent of segmentation, while exponent-derived weights deliberately
+        use the eligible chunk count as their dataset-size measure.
+        """
+        if self.dataset_sampling_weights is None:
+            groups = list(self.valid_groups)
+            if self.shuffle:
+                self.rng.shuffle(groups)
+            return groups
+
+        total_draws = len(self.valid_groups)
+        total_weight = sum(self.dataset_sampling_weights.values())
+        exact_counts = {
+            dataset_id: total_draws * weight / total_weight
+            for dataset_id, weight in self.dataset_sampling_weights.items()
+        }
+        draw_counts = {dataset_id: int(count) for dataset_id, count in exact_counts.items()}
+        remainder = total_draws - sum(draw_counts.values())
+        for dataset_id in sorted(
+            exact_counts,
+            key=lambda key: (exact_counts[key] - draw_counts[key], key),
+            reverse=True,
+        )[:remainder]:
+            draw_counts[dataset_id] += 1
+
+        groups = []
+        for dataset_id, draw_count in draw_counts.items():
+            candidates = self.valid_groups_by_dataset[dataset_id]
+            if draw_count <= len(candidates):
+                groups.extend(self.rng.sample(candidates, k=draw_count))
+            else:
+                groups.extend(candidates)
+                groups.extend(self.rng.choices(candidates, k=draw_count - len(candidates)))
+        if self.shuffle:
+            self.rng.shuffle(groups)
+        return groups
 
     def _sample_from_group(self, group_id):
         indices = self.group_indices[group_id]
@@ -119,9 +251,7 @@ class GroupedStemBatchSampler(Sampler):
         if self.seed is not None:
             self.rng = random.Random(self.seed + self.epoch)
 
-        groups = list(self.valid_groups)
-        if self.shuffle:
-            self.rng.shuffle(groups)
+        groups = self._balanced_epoch_groups()
 
         for start in range(0, len(groups), self.groups_per_batch):
             batch_groups = groups[start:start + self.groups_per_batch]

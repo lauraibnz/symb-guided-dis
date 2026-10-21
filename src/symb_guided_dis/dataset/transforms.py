@@ -1,7 +1,7 @@
 import math
 import random
 import warnings
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 
@@ -84,56 +84,6 @@ def _align_waveform_length(waveform: torch.Tensor, target_num_samples: int) -> t
     return waveform.contiguous()
 
 
-class RandomSilenceTransform:
-
-    def __init__(
-        self,
-        min_width: float = 0.07,
-        max_width: float = 0.15,
-        min_slope: float = 0.01,
-        max_slope: float = 0.05,
-    ) -> None:
-        self.min_width = float(min_width)
-        self.max_width = float(max_width)
-        self.min_slope = float(min_slope)
-        self.max_slope = float(max_slope)
-
-    def __call__(self, waveform: torch.Tensor, rng: Optional[random.Random] = None) -> Tuple[torch.Tensor, Dict[str, float]]:
-        rng = rng or random.Random()
-        waveform = _ensure_mono_waveform(waveform)
-        length = int(waveform.shape[-1])
-        if length <= 1:
-            return waveform, {"start": 0.0, "width": 0.0, "fade": 0.0}
-
-        min_width = max(1, int(round(self.min_width * length)))
-        max_width = max(min_width, int(round(self.max_width * length)))
-        width = rng.randint(min_width, max_width)
-
-        min_fade = max(1, int(round(self.min_slope * length)))
-        max_fade = max(min_fade, int(round(self.max_slope * length)))
-        fade = min(rng.randint(min_fade, max_fade), max(1, length // 4))
-
-        start_min = fade
-        start_max = max(start_min, length - width - fade)
-        start = rng.randint(start_min, start_max) if start_max >= start_min else start_min
-
-        envelope = torch.ones_like(waveform)
-        if fade > 0:
-            fade_in = torch.linspace(1.0, 0.0, fade, dtype=waveform.dtype)
-            fade_out = torch.linspace(0.0, 1.0, fade, dtype=waveform.dtype)
-            envelope[start - fade:start] = fade_in
-            envelope[start + width:start + width + fade] = fade_out[: max(0, length - (start + width))]
-        envelope[start:start + width] = 0.0
-
-        out = waveform * envelope
-        params = {
-            "start_frac": float(start / max(1, length)),
-            "width_frac": float(width / max(1, length)),
-            "fade_frac": float(fade / max(1, length)),
-        }
-        return out.contiguous(), params
-
-
 class PitchTimeStretchTransform:
 
     def __init__(
@@ -143,21 +93,13 @@ class PitchTimeStretchTransform:
         ts_max: float = 1.1,
         pitch_min: int = -3,
         pitch_max: int = 3,
-        segment_samples: Optional[int] = 131072,
-        random_silence: bool = False,
-        silence_masks: int = 2,
     ) -> None:
         self.sample_rate = int(sample_rate)
         self.ts_min = float(ts_min)
         self.ts_max = float(ts_max)
         self.pitch_min = int(pitch_min)
         self.pitch_max = int(pitch_max)
-        self.segment_samples = None if segment_samples is None or int(segment_samples) <= 0 else int(segment_samples)
-        self.random_silence = bool(random_silence)
-        self.silence_masks = max(0, int(silence_masks))
-        self.silence_transform = RandomSilenceTransform() if self.random_silence else None
-
-    def _sample_segment_params(self, rng: random.Random) -> Tuple[float, int]:
+    def _sample_params(self, rng: random.Random) -> Tuple[float, int]:
         stretch = rng.uniform(self.ts_min, self.ts_max)
         pitch = rng.randint(self.pitch_min, self.pitch_max) if self.pitch_min != self.pitch_max else int(self.pitch_min)
         return float(stretch), int(pitch)
@@ -193,57 +135,6 @@ class PitchTimeStretchTransform:
                 pitch_semitones=pitch_semitones,
             )
 
-    def __call__(
-        self,
-        waveform: torch.Tensor,
-        rng: Optional[random.Random] = None,
-        return_params: bool = False,
-    ):
-        rng = rng or random.Random()
-        waveform = _ensure_mono_waveform(waveform)
-        target_num_samples = int(waveform.shape[-1])
-
-        if self.segment_samples is None:
-            segment_starts = [0]
-        else:
-            segment_starts = list(range(0, target_num_samples, self.segment_samples))
-
-        pieces: List[torch.Tensor] = []
-        segment_params: List[Dict[str, Any]] = []
-        for start in segment_starts:
-            end = target_num_samples if self.segment_samples is None else min(target_num_samples, start + self.segment_samples)
-            segment = waveform[start:end]
-            stretch, pitch = self._sample_segment_params(rng)
-            augmented = self._apply_pitch_tempo(segment, stretch=stretch, pitch_semitones=pitch)
-            pieces.append(augmented)
-            segment_params.append(
-                {
-                    "start_sample": int(start),
-                    "end_sample": int(end),
-                    "stretch": float(stretch),
-                    "pitch_semitones": int(pitch),
-                }
-            )
-
-        augmented = torch.cat(pieces, dim=-1) if pieces else waveform.clone()
-        silence_params: List[Dict[str, float]] = []
-        if self.silence_transform is not None:
-            for _ in range(self.silence_masks):
-                augmented, silence_param = self.silence_transform(augmented, rng=rng)
-                silence_params.append(silence_param)
-
-        augmented = _align_waveform_length(augmented, target_num_samples)
-        params = {
-            "segment_samples": self.segment_samples,
-            "segments": segment_params,
-            "random_silence": bool(self.random_silence),
-            "silence_masks": silence_params,
-        }
-
-        if return_params:
-            return augmented, params
-        return augmented
-
     def apply_global(
         self,
         waveform: torch.Tensor,
@@ -255,14 +146,8 @@ class PitchTimeStretchTransform:
         waveform = _ensure_mono_waveform(waveform)
         target_num_samples = int(waveform.shape[-1])
 
-        stretch, pitch = self._sample_segment_params(rng)
+        stretch, pitch = self._sample_params(rng)
         augmented = self._apply_pitch_tempo(waveform, stretch=stretch, pitch_semitones=pitch)
-
-        silence_params: List[Dict[str, float]] = []
-        if self.silence_transform is not None:
-            for _ in range(self.silence_masks):
-                augmented, silence_param = self.silence_transform(augmented, rng=rng)
-                silence_params.append(silence_param)
 
         if align_output_length:
             augmented = _align_waveform_length(augmented, target_num_samples)
@@ -270,8 +155,6 @@ class PitchTimeStretchTransform:
             "mode": "global_stem" if not align_output_length else "global_chunk",
             "stretch": float(stretch),
             "pitch_semitones": int(pitch),
-            "random_silence": bool(self.random_silence),
-            "silence_masks": silence_params,
             "output_num_samples": int(augmented.shape[-1]),
         }
         if return_params:
@@ -289,9 +172,6 @@ def build_timbre_augmented_chunk_bank(
     ts_max: float = 1.1,
     pitch_min: int = -3,
     pitch_max: int = 3,
-    segment_samples: Optional[int] = 131072,
-    random_silence: bool = False,
-    silence_masks: int = 2,
     rng: Optional[random.Random] = None,
 ) -> Tuple[torch.Tensor, List[List[Dict[str, Any]]]]:
     waveform = _ensure_mono_waveform(waveform)
@@ -306,9 +186,6 @@ def build_timbre_augmented_chunk_bank(
         ts_max=ts_max,
         pitch_min=pitch_min,
         pitch_max=pitch_max,
-        segment_samples=segment_samples,
-        random_silence=random_silence,
-        silence_masks=silence_masks,
     )
 
     total_samples = int(waveform.shape[-1])
@@ -348,3 +225,45 @@ def build_timbre_augmented_chunk_bank(
         bank_params.append(augment_params)
 
     return torch.stack(bank_chunks, dim=0), bank_params
+
+
+def replay_timbre_augmented_stem(
+    waveform: torch.Tensor,
+    *,
+    sample_rate: int,
+    params: Dict[str, Any],
+) -> torch.Tensor:
+    """Recreate one stem-level timbre augmentation from stored parameters.
+
+    This is the counterpart to :func:`build_timbre_augmented_chunk_bank` for
+    derived-dataset tools.  It supports the current ``global_stem`` format and
+    the explicit original-audio fallback written when augmentation fails.
+    """
+    waveform = _ensure_mono_waveform(waveform)
+    if params.get("fallback") == "original":
+        return waveform
+    if params.get("mode") != "global_stem":
+        raise ValueError(
+            "Only recorded global_stem timbre augmentations can be replayed; "
+            f"got mode={params.get('mode')!r}."
+        )
+
+    transform = PitchTimeStretchTransform(sample_rate=sample_rate)
+    augmented = transform._apply_pitch_tempo(
+        waveform,
+        stretch=float(params["stretch"]),
+        pitch_semitones=int(params["pitch_semitones"]),
+    )
+    return augmented.contiguous()
+
+
+def chunk_recorded_timbre_augmentation(
+    augmented_stem: torch.Tensor,
+    *,
+    chunk_samples: int,
+    params: Dict[str, Any],
+) -> torch.Tensor:
+    """Select a fixed-size chunk from a replayed timbre-augmented stem."""
+    start = int(params.get("augmented_start_sample", params.get("original_start_sample", 0)))
+    chunk = augmented_stem[start : start + int(chunk_samples)]
+    return _align_waveform_length(chunk, int(chunk_samples))
