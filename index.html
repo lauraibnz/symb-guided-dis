@@ -54,15 +54,15 @@
     <h1>Audio Examples</h1>
 
     <p>
-      This page presents qualitative listening examples for reconstruction and one-shot timbre transfer.
+      This page presents qualitative listening examples on synthetic and real-world data.
     </p>
+    <h2>Synthetic Data</h2>
+
     <p>
-      If the embedded audio is not displayed in your browser or repository view, the audio examples are
-      also available
-      <a href="https://drive.google.com/drive/folders/13amCZZqn6F-8eDQZo74UgCwpzhgJYD8S?usp=sharing">here</a>.
+      Examples below use stems from Slakh2100.
     </p>
 
-    <h2 id="transfer-section">One-Shot Timbre Transfer</h2>
+    <h3 id="transfer-section">One-Shot Timbre Transfer</h3>
 
     <p id="transfer-intro">
       For each example, we provide the source structure, the target timbre reference, and outputs from
@@ -305,7 +305,7 @@
       </table>
     </div>
 
-    <h2 id="reconstruction-section">Reconstruction</h2>
+    <h3 id="reconstruction-section">Reconstruction</h3>
 
     <p>
       For each example, we provide the reference audio together with reconstructions from our model,
@@ -518,6 +518,96 @@
             <td style="border: 1px solid #d0d7de; padding: 8px;">
               <audio controls style="width: 180px;"><source src="assets/audio/ours_no_struct/reconstruction/strings.mp3" type="audio/mpeg" /></audio>
             </td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <h2 id="real-world-section">Real-World Audio</h2>
+
+    <h3>One-Shot Timbre Transfer</h3>
+
+    <p>
+      These examples use held-out URMP excerpts. The source and target references are shared across all
+      model outputs in each row. “Ours (ref.)” uses the dataset MIDI annotation as structural guidance,
+      while “Ours (auto.)” uses an automatic transcription.
+    </p>
+
+    <div id="real-world-transfer-table" style="width: 100%; overflow-x: auto;">
+      <table style="border-collapse: collapse; width: max-content; min-width: 100%; text-align: center;">
+        <thead>
+          <tr>
+            <th style="border: 1px solid #d0d7de; padding: 8px;">Example</th>
+            <th style="border: 1px solid #d0d7de; padding: 8px;">Source Structure</th>
+            <th style="border: 1px solid #d0d7de; padding: 8px;">Target Timbre</th>
+            <th style="border: 1px solid #d0d7de; padding: 8px;">AFTER</th>
+            <th style="border: 1px solid #d0d7de; padding: 8px;">Ours (ref.)</th>
+            <th style="border: 1px solid #d0d7de; padding: 8px;">Ours (auto.)</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td style="border: 1px solid #d0d7de; padding: 8px;">Bassoon → Clarinet</td>
+            <td style="border: 1px solid #d0d7de; padding: 8px;"><audio controls style="width: 180px;"><source src="assets/audio/real_world/urmp/source/01.mp3" type="audio/mpeg" /></audio></td>
+            <td style="border: 1px solid #d0d7de; padding: 8px;"><audio controls style="width: 180px;"><source src="assets/audio/real_world/urmp/target/01.mp3" type="audio/mpeg" /></audio></td>
+            <td style="border: 1px solid #d0d7de; padding: 8px;"><audio controls style="width: 180px;"><source src="assets/audio/real_world/urmp/after/01.mp3" type="audio/mpeg" /></audio></td>
+            <td style="border: 1px solid #d0d7de; padding: 8px;"><audio controls style="width: 180px;"><source src="assets/audio/real_world/urmp/ours_ref/01.mp3" type="audio/mpeg" /></audio></td>
+            <td style="border: 1px solid #d0d7de; padding: 8px;"><audio controls style="width: 180px;"><source src="assets/audio/real_world/urmp/ours_auto/01.mp3" type="audio/mpeg" /></audio></td>
+          </tr>
+          <tr>
+            <td style="border: 1px solid #d0d7de; padding: 8px;">Clarinet → Oboe</td>
+            <td style="border: 1px solid #d0d7de; padding: 8px;"><audio controls style="width: 180px;"><source src="assets/audio/real_world/urmp/source/02.mp3" type="audio/mpeg" /></audio></td>
+            <td style="border: 1px solid #d0d7de; padding: 8px;"><audio controls style="width: 180px;"><source src="assets/audio/real_world/urmp/target/02.mp3" type="audio/mpeg" /></audio></td>
+            <td style="border: 1px solid #d0d7de; padding: 8px;"><audio controls style="width: 180px;"><source src="assets/audio/real_world/urmp/after/02.mp3" type="audio/mpeg" /></audio></td>
+            <td style="border: 1px solid #d0d7de; padding: 8px;"><audio controls style="width: 180px;"><source src="assets/audio/real_world/urmp/ours_ref/02.mp3" type="audio/mpeg" /></audio></td>
+            <td style="border: 1px solid #d0d7de; padding: 8px;"><audio controls style="width: 180px;"><source src="assets/audio/real_world/urmp/ours_auto/02.mp3" type="audio/mpeg" /></audio></td>
+          </tr>
+          <tr>
+            <td style="border: 1px solid #d0d7de; padding: 8px;">Flute → Cello</td>
+            <td style="border: 1px solid #d0d7de; padding: 8px;"><audio controls style="width: 180px;"><source src="assets/audio/real_world/urmp/source/03.mp3" type="audio/mpeg" /></audio></td>
+            <td style="border: 1px solid #d0d7de; padding: 8px;"><audio controls style="width: 180px;"><source src="assets/audio/real_world/urmp/target/03.mp3" type="audio/mpeg" /></audio></td>
+            <td style="border: 1px solid #d0d7de; padding: 8px;"><audio controls style="width: 180px;"><source src="assets/audio/real_world/urmp/after/03.mp3" type="audio/mpeg" /></audio></td>
+            <td style="border: 1px solid #d0d7de; padding: 8px;"><audio controls style="width: 180px;"><source src="assets/audio/real_world/urmp/ours_ref/03.mp3" type="audio/mpeg" /></audio></td>
+            <td style="border: 1px solid #d0d7de; padding: 8px;"><audio controls style="width: 180px;"><source src="assets/audio/real_world/urmp/ours_auto/03.mp3" type="audio/mpeg" /></audio></td>
+          </tr>
+          <tr>
+            <td style="border: 1px solid #d0d7de; padding: 8px;">Oboe → Violin</td>
+            <td style="border: 1px solid #d0d7de; padding: 8px;"><audio controls style="width: 180px;"><source src="assets/audio/real_world/urmp/source/04.mp3" type="audio/mpeg" /></audio></td>
+            <td style="border: 1px solid #d0d7de; padding: 8px;"><audio controls style="width: 180px;"><source src="assets/audio/real_world/urmp/target/04.mp3" type="audio/mpeg" /></audio></td>
+            <td style="border: 1px solid #d0d7de; padding: 8px;"><audio controls style="width: 180px;"><source src="assets/audio/real_world/urmp/after/04.mp3" type="audio/mpeg" /></audio></td>
+            <td style="border: 1px solid #d0d7de; padding: 8px;"><audio controls style="width: 180px;"><source src="assets/audio/real_world/urmp/ours_ref/04.mp3" type="audio/mpeg" /></audio></td>
+            <td style="border: 1px solid #d0d7de; padding: 8px;"><audio controls style="width: 180px;"><source src="assets/audio/real_world/urmp/ours_auto/04.mp3" type="audio/mpeg" /></audio></td>
+          </tr>
+          <tr>
+            <td style="border: 1px solid #d0d7de; padding: 8px;">Saxophone → Viola</td>
+            <td style="border: 1px solid #d0d7de; padding: 8px;"><audio controls style="width: 180px;"><source src="assets/audio/real_world/urmp/source/05.mp3" type="audio/mpeg" /></audio></td>
+            <td style="border: 1px solid #d0d7de; padding: 8px;"><audio controls style="width: 180px;"><source src="assets/audio/real_world/urmp/target/05.mp3" type="audio/mpeg" /></audio></td>
+            <td style="border: 1px solid #d0d7de; padding: 8px;"><audio controls style="width: 180px;"><source src="assets/audio/real_world/urmp/after/05.mp3" type="audio/mpeg" /></audio></td>
+            <td style="border: 1px solid #d0d7de; padding: 8px;"><audio controls style="width: 180px;"><source src="assets/audio/real_world/urmp/ours_ref/05.mp3" type="audio/mpeg" /></audio></td>
+            <td style="border: 1px solid #d0d7de; padding: 8px;"><audio controls style="width: 180px;"><source src="assets/audio/real_world/urmp/ours_auto/05.mp3" type="audio/mpeg" /></audio></td>
+          </tr>
+          <tr>
+            <td style="border: 1px solid #d0d7de; padding: 8px;">Viola → Flute</td>
+            <td style="border: 1px solid #d0d7de; padding: 8px;"><audio controls style="width: 180px;"><source src="assets/audio/real_world/urmp/source/06.mp3" type="audio/mpeg" /></audio></td>
+            <td style="border: 1px solid #d0d7de; padding: 8px;"><audio controls style="width: 180px;"><source src="assets/audio/real_world/urmp/target/06.mp3" type="audio/mpeg" /></audio></td>
+            <td style="border: 1px solid #d0d7de; padding: 8px;"><audio controls style="width: 180px;"><source src="assets/audio/real_world/urmp/after/06.mp3" type="audio/mpeg" /></audio></td>
+            <td style="border: 1px solid #d0d7de; padding: 8px;"><audio controls style="width: 180px;"><source src="assets/audio/real_world/urmp/ours_ref/06.mp3" type="audio/mpeg" /></audio></td>
+            <td style="border: 1px solid #d0d7de; padding: 8px;"><audio controls style="width: 180px;"><source src="assets/audio/real_world/urmp/ours_auto/06.mp3" type="audio/mpeg" /></audio></td>
+          </tr>
+          <tr>
+            <td style="border: 1px solid #d0d7de; padding: 8px;">Cello → Saxophone</td>
+            <td style="border: 1px solid #d0d7de; padding: 8px;"><audio controls style="width: 180px;"><source src="assets/audio/real_world/urmp/source/07.mp3" type="audio/mpeg" /></audio></td>
+            <td style="border: 1px solid #d0d7de; padding: 8px;"><audio controls style="width: 180px;"><source src="assets/audio/real_world/urmp/target/07.mp3" type="audio/mpeg" /></audio></td>
+            <td style="border: 1px solid #d0d7de; padding: 8px;"><audio controls style="width: 180px;"><source src="assets/audio/real_world/urmp/after/07.mp3" type="audio/mpeg" /></audio></td>
+            <td style="border: 1px solid #d0d7de; padding: 8px;"><audio controls style="width: 180px;"><source src="assets/audio/real_world/urmp/ours_ref/07.mp3" type="audio/mpeg" /></audio></td>
+            <td style="border: 1px solid #d0d7de; padding: 8px;"><audio controls style="width: 180px;"><source src="assets/audio/real_world/urmp/ours_auto/07.mp3" type="audio/mpeg" /></audio></td>
+          </tr>
+          <tr>
+            <td style="border: 1px solid #d0d7de; padding: 8px;">Violin → Bassoon</td>
+            <td style="border: 1px solid #d0d7de; padding: 8px;"><audio controls style="width: 180px;"><source src="assets/audio/real_world/urmp/source/08.mp3" type="audio/mpeg" /></audio></td>
+            <td style="border: 1px solid #d0d7de; padding: 8px;"><audio controls style="width: 180px;"><source src="assets/audio/real_world/urmp/target/08.mp3" type="audio/mpeg" /></audio></td>
+            <td style="border: 1px solid #d0d7de; padding: 8px;"><audio controls style="width: 180px;"><source src="assets/audio/real_world/urmp/after/08.mp3" type="audio/mpeg" /></audio></td>
+            <td style="border: 1px solid #d0d7de; padding: 8px;"><audio controls style="width: 180px;"><source src="assets/audio/real_world/urmp/ours_ref/08.mp3" type="audio/mpeg" /></audio></td>
+            <td style="border: 1px solid #d0d7de; padding: 8px;"><audio controls style="width: 180px;"><source src="assets/audio/real_world/urmp/ours_auto/08.mp3" type="audio/mpeg" /></audio></td>
           </tr>
         </tbody>
       </table>
